@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mario-Man: Mushroom Kingdom Maze</title>
+<style>
+:root{--red:#e53935;--gold:#ffd83d}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:radial-gradient(circle at 20% 10%,#394fa3,transparent 34%),linear-gradient(145deg,#111a4b,#39135f 70%,#100d2c);color:#fff;font-family:system-ui,sans-serif}
+main{width:min(96vw,780px);text-align:center}
+h1{margin:0 0 4px;color:var(--gold);font-size:clamp(1.4rem,5vw,2.4rem);letter-spacing:.05em;text-shadow:3px 3px #8d1f28}
+p{margin:0 0 12px;opacity:.85}
+.frame{padding:10px;border:4px solid #f9d24c;border-radius:18px;background:#16205b;box-shadow:0 12px 35px #0008,inset 0 0 0 3px #6736ad}
+canvas{display:block;width:100%;height:auto;border-radius:9px;background:#070d2f;image-rendering:crisp-edges}
+.controls{display:flex;justify-content:center;gap:8px;margin-top:12px;flex-wrap:wrap}
+button{border:0;border-radius:999px;padding:9px 15px;color:#fff;font-weight:800;cursor:pointer;background:var(--red);box-shadow:0 4px #8e1e27}
+button:active{transform:translateY(3px);box-shadow:0 1px #8e1e27}
+.hint{margin-top:10px;font-size:.82rem;opacity:.78}
+</style>
+</head>
+<body>
+<main>
+<h1>🍄 MARIO-MAN 🍄</h1>
+<p>Eat every coin, grab stars, and dodge the Koopas!</p>
+<div class="frame"><canvas id="game" aria-label="Mario-Man game"></canvas></div>
+<div class="controls"><button id="restart">Restart</button><button id="pause">Pause</button></div>
+<div class="hint">Move with Arrow Keys or WASD · Press P to pause · Press R to restart</div>
+</main>
+<script>
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+const C=23,R=17,T=32,HUD=1;
+canvas.width=C*T;canvas.height=(R+HUD)*T;
+const D={left:{x:-1,y:0},right:{x:1,y:0},up:{x:0,y:-1},down:{x:0,y:1},none:{x:0,y:0}};
+let maze,pellets,powerups,player,enemies,score,lives,powerTimer,paused,state,last,acc;
+
+function buildMaze(){
+  const m=Array.from({length:R},()=>Array(C).fill(0));
+  for(let x=0;x<C;x++){m[0][x]=1;m[R-1][x]=1}
+  for(let y=0;y<R;y++){m[y][0]=1;m[y][C-1]=1}
+  const h=(y,a,b)=>{for(let x=a;x<=b;x++)m[y][x]=1};
+  const v=(x,a,b)=>{for(let y=a;y<=b;y++)m[y][x]=1};
+  h(3,2,7);h(3,15,20);h(13,2,7);h(13,15,20);
+  h(6,3,7);h(6,15,19);h(10,3,7);h(10,15,19);
+  v(3,3,6);v(19,3,6);v(3,10,13);v(19,10,13);
+  v(7,3,6);v(15,3,6);v(7,10,13);v(15,10,13);
+  v(10,1,4);v(12,1,4);v(10,12,15);v(12,12,15);
+  h(7,9,10);h(7,12,13);h(9,9,10);h(9,12,13);
+  for(let y=7;y<=9;y++)for(let x=9;x<=13;x++)m[y][x]=0;
+  return m;
+}
+function reset(){
+  maze=buildMaze();pellets=new Set();powerups=new Set();
+  for(let y=1;y<R-1;y++)for(let x=1;x<C-1;x++)if(!maze[y][x])pellets.add(x+','+y);
+  const ps={x:11,y:8},starts=[{x:10,y:8},{x:12,y:8},{x:11,y:7},{x:11,y:9}];
+  pellets.delete(ps.x+','+ps.y);starts.forEach(p=>pellets.delete(p.x+','+p.y));
+  [[1,1],[21,1],[1,15],[21,15]].forEach(p=>{powerups.add(p[0]+','+p[1]);pellets.delete(p[0]+','+p[1])});
+  player={x:ps.x,y:ps.y,dir:D.left,next:D.left};
+  enemies=starts.map((p,i)=>({x:p.x,y:p.y,sx:p.x,sy:p.y,dir:i%2?D.right:D.left,color:['#e53935','#23a455','#ef8c25','#9b4dcc'][i]}));
+  score=0;lives=3;powerTimer=0;paused=false;state='playing';acc=0;last=performance.now();
+}
+function wall(x,y){return x<0||y<0||x>=C||y>=R||maze[y][x]===1}
+function aligned(o){return Math.abs(o.x-Math.round(o.x))<.07&&Math.abs(o.y-Math.round(o.y))<.07}
+function snap(o){if(Math.abs(o.x-Math.round(o.x))<.08)o.x=Math.round(o.x);if(Math.abs(o.y-Math.round(o.y))<.08)o.y=Math.round(o.y)}
+function can(o,d){return d&& (d.x||d.y) && !wall(Math.round(o.x+d.x*.62),Math.round(o.y+d.y*.62))}
+function same(a,b){return a.x===b.x&&a.y===b.y}
+function choose(e){
+  const reverse={x:-e.dir.x,y:-e.dir.y};
+  let a=Object.values(D).filter(d=>can(e,d)&&!same(d,reverse));
+  if(!a.length)a=Object.values(D).filter(d=>can(e,d));
+  if(!a.length)return D.none;
+  if(powerTimer>0&&Math.random()<.75)return a[Math.floor(Math.random()*a.length)];
+  a.sort((u,v)=>{
+    const ux=Math.round(e.x+u.x),uy=Math.round(e.y+u.y),vx=Math.round(e.x+v.x),vy=Math.round(e.y+v.y);
+    return Math.abs(ux-player.x)+Math.abs(uy-player.y)-Math.abs(vx-player.x)-Math.abs(vy-player.y)+(Math.random()-.5)*3
+  });
+  return a[0];
+}
+function updatePlayer(){
+  snap(player);
+  if(aligned(player)&&can(player,player.next))player.dir=player.next;
+  if(!can(player,player.dir))player.dir=D.none;
+  player.x+=player.dir.x*.13;player.y+=player.dir.y*.13;snap(player);
+  const k=Math.round(player.x)+','+Math.round(player.y);
+  if(pellets.delete(k))score+=10;
+  if(powerups.delete(k)){score+=50;powerTimer=7000}
+  if(!pellets.size)state='won';
+}
+function updateEnemies(){
+  for(const e of enemies){
+    snap(e);
+    if(aligned(e)&&(!can(e,e.dir)||Math.random()<.12))e.dir=choose(e);
+    if(!can(e,e.dir))e.dir=choose(e);
+    const speed=powerTimer>0?.095:.115;
+    e.x+=e.dir.x*speed;e.y+=e.dir.y*speed;snap(e);
+    if(Math.hypot(e.x-player.x,e.y-player.y)<.52){
+      if(powerTimer>0){score+=200;e.x=e.sx;e.y=e.sy;e.dir=D.left}
+      else{lives--;if(lives<=0)state='lost';else{player.x=11;player.y=8;player.dir=D.left;player.next=D.left;enemies.forEach((q,i)=>{q.x=q.sx;q.y=q.sy;q.dir=i%2?D.right:D.left})}}
+    }
+  }
+}
+function tick(){
+  if(state!=='playing'||paused)return;
+  updatePlayer();updateEnemies();if(powerTimer>0)powerTimer-=140;
+}
+function rr(x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r);ctx.fill()}
+function drawWall(x,y){
+  const px=x*T,py=(y+HUD)*T;
+  ctx.fillStyle='#1768ba';rr(px+2,py+2,T-4,T-4,7);
+  ctx.fillStyle='#3aa5ec';ctx.fillRect(px+5,py+5,T-10,4);
+  ctx.fillStyle='#10427d';ctx.fillRect(px+5,py+T-8,T-10,4);
+  ctx.strokeStyle='#0c376d';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(px+T/2,py+10);ctx.lineTo(px+T/2,py+T-5);ctx.stroke();
+}
+function drawCoin(x,y){
+  const px=x*T+T/2,py=(y+HUD)*T+T/2;
+  ctx.fillStyle='#ffd83d';ctx.beginPath();ctx.ellipse(px,py,6,9,0,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle='#fff2a1';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(px,py-5);ctx.lineTo(px,py+5);ctx.stroke();
+}
+function drawStar(x,y){
+  const px=x*T+T/2,py=(y+HUD)*T+T/2;ctx.save();ctx.translate(px,py);ctx.rotate(performance.now()/800);
+  ctx.fillStyle='#fff36b';ctx.strokeStyle='#f59d24';ctx.lineWidth=2;ctx.beginPath();
+  for(let i=0;i<10;i++){const a=-Math.PI/2+i*Math.PI/5,r=i%2?6:13;ctx.lineTo(Math.cos(a)*r,Math.sin(a)*r)}
+  ctx.closePath();ctx.fill();ctx.stroke();ctx.restore();
+}
+function drawPlayer(){
+  const px=player.x*T+T/2,py=(player.y+HUD)*T+T/2;let a=0;
+  if(player.dir===D.left)a=Math.PI;if(player.dir===D.up)a=-Math.PI/2;if(player.dir===D.down)a=Math.PI/2;
+  ctx.save();ctx.translate(px,py);ctx.rotate(a);ctx.fillStyle='#ffd52f';ctx.beginPath();ctx.moveTo(0,0);ctx.arc(0,0,13,.28,Math.PI*2-.28);ctx.closePath();ctx.fill();
+  ctx.fillStyle='#d9272e';ctx.beginPath();ctx.ellipse(-1,-10,14,5,0,Math.PI,Math.PI*2);ctx.fill();ctx.fillRect(-11,-11,20,4);
+  ctx.fillStyle='#222';ctx.beginPath();ctx.arc(5,-4,2,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#572219';ctx.lineWidth=2;ctx.beginPath();ctx.arc(3,3,6,.15,1.15);ctx.stroke();ctx.restore();
+}
+function drawEnemy(e){
+  const px=e.x*T+T/2,py=(e.y+HUD)*T+T/2,fright=powerTimer>0;ctx.save();ctx.translate(px,py);
+  ctx.fillStyle=fright?'#315bd8':e.color;ctx.beginPath();ctx.moveTo(-13,11);ctx.lineTo(-13,-3);ctx.quadraticCurveTo(-13,-14,0,-14);ctx.quadraticCurveTo(13,-14,13,-3);ctx.lineTo(13,11);ctx.lineTo(7,7);ctx.lineTo(1,11);ctx.lineTo(-5,7);ctx.lineTo(-13,11);ctx.fill();
+  ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(-5,-4,4,0,Math.PI*2);ctx.arc(5,-4,4,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#17182d';ctx.beginPath();ctx.arc(-5,-4,1.7,0,Math.PI*2);ctx.arc(5,-4,1.7,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#4b241a';ctx.fillRect(-12,9,7,4);ctx.fillRect(5,9,7,4);ctx.restore();
+}
+function hud(){
+  const g=ctx.createLinearGradient(0,0,canvas.width,0);g.addColorStop(0,'#e53935');g.addColorStop(.5,'#ff8f2f');g.addColorStop(1,'#f4c43b');
+  ctx.fillStyle='#101936';ctx.fillRect(0,0,canvas.width,T);ctx.fillStyle=g;ctx.fillRect(0,0,canvas.width,4);
+  ctx.font='bold 15px system-ui';ctx.textBaseline='middle';ctx.fillStyle='#fff';ctx.fillText('SCORE '+score,14,T/2);
+  ctx.fillStyle='#ffd83d';ctx.fillText('COINS '+pellets.size,175,T/2);ctx.fillStyle='#fff';ctx.fillText('LIVES '+'♥'.repeat(lives),330,T/2);
+  if(powerTimer>0){ctx.fillStyle='#8bd5ff';ctx.fillText('STAR POWER!',505,T/2)}
+}
+function overlay(){
+  if(state==='playing'&&!paused)return;
+  ctx.fillStyle='#070d2fcc';ctx.fillRect(0,T,canvas.width,R*T);ctx.textAlign='center';
+  ctx.fillStyle=state==='won'?'#ffe34c':'#fff';ctx.font='900 42px system-ui';
+  let title='PAUSED',msg='Press P or tap Pause to continue';
+  if(state==='won'){title='YOU WIN!';msg='The Mushroom Kingdom is safe!'}
+  if(state==='lost'){title='GAME OVER';msg='Press R or tap Restart to try again'}
+  ctx.fillText(title,canvas.width/2,canvas.height/2-15);ctx.font='bold 16px system-ui';ctx.fillStyle='#fff';ctx.fillText(msg,canvas.width/2,canvas.height/2+25);ctx.textAlign='left';
+}
+function draw(){
+  const bg=ctx.createLinearGradient(0,T,0,canvas.height);bg.addColorStop(0,'#090f38');bg.addColorStop(1,'#180c40');ctx.fillStyle=bg;ctx.fillRect(0,T,canvas.width,R*T);
+  hud();for(let y=0;y<R;y++)for(let x=0;x<C;x++)if(maze[y][x])drawWall(x,y);
+  pellets.forEach(k=>{const p=k.split(',').map(Number);drawCoin(p[0],p[1])});
+  powerups.forEach(k=>{const p=k.split(',').map(Number);drawStar(p[0],p[1])});
+  enemies.forEach(drawEnemy);drawPlayer();overlay();
+}
+function loop(now){
+  const dt=Math.min(now-last,100);last=now;acc+=dt;while(acc>=140){tick();acc-=140}draw();requestAnimationFrame(loop);
+}
+const keydir={arrowleft:'left',a:'left',arrowright:'right',d:'right',arrowup:'up',w:'up',arrowdown:'down',s:'down'};
+document.addEventListener('keydown',e=>{
+  const k=e.key.toLowerCase();
+  if(keydir[k]){e.preventDefault();if(state==='playing')player.next=D[keydir[k]]}
+  if(k==='p'&&state==='playing')paused=!paused;
+  if(k==='r')reset();
+});
+document.getElementById('restart').onclick=reset;
+document.getElementById('pause').onclick=()=>{if(state==='playing')paused=!paused};
+reset();requestAnimationFrame(loop);
+</script>
+</body>
+</html>
